@@ -32,7 +32,7 @@ clippy.lint_groups_priority = "allow"
 # eth
 alloy-sol-types = "0.7"
 alloy-primitives = "0.7"
-alloy-rpc-types = { version = "0.2", features = ["eth", "trace"] }
+alloy-rpc-types = { version = "0.2", features = ["eth", "trace"], path = "/Users/cab/dev/alloy/crates/rpc-types" }
 revm = { version = "13", default-features = false, features = ["std"] }
 
 anstyle = "1.0"
@@ -46,6 +46,7 @@ serde_json = "1.0"
 # js-tracer
 boa_engine = { version = "0.19", optional = true }
 boa_gc = { version = "0.19", optional = true }
+log = "0.4.22"
 
 [dev-dependencies]
 snapbox = "0.6"
