@@ -152,6 +152,7 @@ fn test_sentiotracer_weth_transfer() {
     let mut tracer_cfg: SentioTracerConfig = Default::default();
     let functions: Vec<FunctionInfo> = serde_json::from_str(functions_str).unwrap();
     tracer_cfg.with_internal_calls = true;
+    tracer_cfg.debug = true;
     tracer_cfg.functions.insert(contract_addr, functions);
     tracer_cfg.calls.insert(contract_addr, vec![182, 3034]);
 
