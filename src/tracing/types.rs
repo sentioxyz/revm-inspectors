@@ -403,6 +403,7 @@ impl CallTraceNode {
             revert_reason: None,
             calls: Default::default(),
             logs: Default::default(),
+            start_index: (), // TODO maybe more elegant way to do this
         };
 
         if self.trace.kind.is_static_call() {
