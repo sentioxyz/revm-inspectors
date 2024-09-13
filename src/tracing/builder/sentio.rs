@@ -234,7 +234,7 @@ impl SentioTraceBuilder {
                             let frame = InternalSentioTrace {
                                 trace: SentioTrace {
                                     typ: OpCode::JUMP.to_string(),
-                                    pc: last_pc,
+                                    pc: prev_step.pc,
                                     start_index: next_inst_idx - 2,
                                     gas: U256::from(step.gas_remaining),
                                     from: Some(step.contract),
