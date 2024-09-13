@@ -235,6 +235,7 @@ impl SentioTraceBuilder {
                                 trace: SentioTrace {
                                     typ: OpCode::JUMP.to_string(),
                                     pc: prev_step.pc,
+                                    function_pc: Some(last_pc),
                                     start_index: next_inst_idx - 2,
                                     gas: U256::from(step.gas_remaining),
                                     from: Some(step.contract),
