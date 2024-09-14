@@ -1,11 +1,9 @@
 //! Sentio trace builder
 
 use crate::tracing::{
-    types::{CallTraceNode, CallTraceStepStackItem},
-    TracingInspectorConfig,
+    types::{CallTraceNode},
 };
 use alloy_primitives::{Address, U256};
-use revm::{db::DatabaseRef};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use alloy_rpc_types::trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig};
@@ -18,8 +16,6 @@ use crate::tracing::utils::maybe_revert_reason;
 pub struct SentioTraceBuilder {
     /// Recorded trace nodes.
     nodes: Vec<CallTraceNode>,
-    /// How the traces were recorded
-    _config: TracingInspectorConfig,
 
     // address => (pc => function)
     function_map: HashMap<Address, HashMap<usize, InternalFunctionInfo>>,
@@ -45,7 +41,7 @@ pub struct InternalFunctionInfo {
 }
 
 impl SentioTraceBuilder {
-    pub fn new(nodes: Vec<CallTraceNode>, config: SentioTracerConfig, _config: TracingInspectorConfig) -> Self {
+    pub fn new(nodes: Vec<CallTraceNode>, config: SentioTracerConfig) -> Self {
         let tracer_config = config.clone();
         let mut function_map: HashMap<Address, HashMap<usize, InternalFunctionInfo>> = HashMap::new();
         for (address, function_infos) in config.functions.into_iter() {
@@ -58,7 +54,7 @@ impl SentioTraceBuilder {
             let pc_set = pcs.into_iter().collect();
             call_map.insert(address, pc_set);
         }
-        Self { nodes, _config, function_map, call_map, tracer_config }
+        Self { nodes, function_map, call_map, tracer_config }
     }
 
     pub fn sentio_traces(&self, gas_used: u64, receipt: Option<SentioReceipt>) -> SentioTrace {
@@ -297,7 +293,6 @@ impl SentioTraceBuilder {
                     };
                     frames.last_mut().unwrap().trace.traces.push(Box::from(frame.trace));
                 }
-                _ => {}
             }
         }
         while frames.len() > 1 {
