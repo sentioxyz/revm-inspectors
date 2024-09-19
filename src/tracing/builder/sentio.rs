@@ -268,13 +268,25 @@ impl SentioTraceBuilder {
                     }
                 }
                 TraceMemberOrder::Log(log_idx) => {
+                    let log = &node.logs[*log_idx];
                     let Some(step) = last_step else {
-                        panic!("log without step");
+                        println!("log without step");
+                        let frame = InternalSentioTrace {
+                            trace: SentioTrace {
+                                typ: "LOG".to_string(),
+                                address: Some(node.trace.address),
+                                topics: Some(Vec::from(log.raw_log.topics())),
+                                data: Some(log.raw_log.data.clone()),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        };
+                        frames.last_mut().unwrap().trace.traces.push(Box::from(frame.trace));
+                        continue;
                     };
                     let (OpCode::LOG0 | OpCode::LOG1 | OpCode::LOG2 | OpCode::LOG3 | OpCode::LOG4) = step.op else {
                         panic!("log without log op");
                     };
-                    let log = &node.logs[*log_idx];
                     let frame = InternalSentioTrace {
                         trace: SentioTrace {
                             typ: step.op.to_string(),
