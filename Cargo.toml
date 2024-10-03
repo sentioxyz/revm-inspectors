@@ -51,7 +51,7 @@ intrusive-collections = { version = "=0.9.6", optional = true }
 log = "0.4.22"
 
 [dev-dependencies]
-snapbox = "0.6"
+snapbox = { version = "0.6", features = ["term-svg"] }
 
 [features]
 serde = ["dep:serde", "revm/serde"]
