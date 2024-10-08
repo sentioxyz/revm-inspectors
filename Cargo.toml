@@ -30,8 +30,8 @@ clippy.lint_groups_priority = "allow"
 
 [dependencies]
 # eth
-alloy-rpc-types-eth = "0.4"
-alloy-rpc-types-trace = "0.4"
+alloy-rpc-types-eth = { git = "https://github.com/sentioxyz/alloy", branch = "release/v0.4.2" }
+alloy-rpc-types-trace = { git = "https://github.com/sentioxyz/alloy", branch = "release/v0.4.2" }
 alloy-sol-types = "0.8"
 alloy-primitives = { version = "0.8", features = ["map"] }
 revm = { version = "14.0.3", default-features = false, features = ["std"] }
@@ -47,6 +47,7 @@ serde_json = "1.0"
 # js-tracer
 boa_engine = { version = "0.19", optional = true }
 boa_gc = { version = "0.19", optional = true }
+log = "0.4.22"
 
 [dev-dependencies]
 snapbox = "0.6"

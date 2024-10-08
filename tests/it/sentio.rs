@@ -2,7 +2,7 @@
 
 use crate::utils::inspect;
 use alloy_primitives::{hex, Address, Bytes, U256};
-use alloy_rpc_types::trace::geth::sentio::{FunctionInfo, SentioTracerConfig};
+use alloy_rpc_types_trace::geth::sentio::{FunctionInfo, SentioTracerConfig};
 use revm::{db::{CacheDB, EmptyDB}, primitives::{
     BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ExecutionResult, HandlerCfg,
     Output, SpecId, TransactTo, TxEnv,

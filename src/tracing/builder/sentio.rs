@@ -6,7 +6,7 @@ use crate::tracing::{
 use alloy_primitives::{Address, U256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use alloy_rpc_types::trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig};
+use alloy_rpc_types_trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig};
 use revm::interpreter::OpCode;
 use log::warn;
 use crate::tracing::types::{CallTraceStep, TraceMemberOrder};
