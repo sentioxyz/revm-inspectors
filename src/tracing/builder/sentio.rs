@@ -131,6 +131,7 @@ impl SentioTraceBuilder {
             }
         }
         let mut entry_found = false;
+        let code_address = node.trace.address;
 
         for i in &node.ordering {
             match i {
@@ -202,7 +203,7 @@ impl SentioTraceBuilder {
                             if *step_idx == 0 {
                                 continue;
                             }
-                            let Some(InternalFunctionInfo { function_info: function, address }) = self.get_function_info(&step.contract, &step.pc) else {
+                            let Some(InternalFunctionInfo { function_info: function, address }) = self.get_function_info(&code_address, &step.pc) else {
                                 continue;
                             };
 
@@ -211,7 +212,7 @@ impl SentioTraceBuilder {
                             if !prev_step.op.is_jump() {
                                 continue;
                             }
-                            if !self.is_call(&prev_step.contract, &prev_step.pc) {
+                            if !self.is_call(&code_address, &prev_step.pc) {
                                 continue;
                             };
 
@@ -235,9 +236,9 @@ impl SentioTraceBuilder {
                                     function_pc: Some(last_pc),
                                     start_index: next_inst_idx - 2,
                                     gas: U256::from(step.gas_remaining),
-                                    from: Some(step.contract.to_string().to_lowercase()),
-                                    to: Some(step.contract.to_string().to_lowercase()),
-                                    code_address: Some(step.contract.to_string().to_lowercase()),
+                                    from: Some(code_address.to_string().to_lowercase()),
+                                    to: None,
+                                    code_address: Some(code_address.to_string().to_lowercase()),
                                     input_stack: if input_enough { Some(stack[stack.len() - function.input_size..].to_vec()) } else { None },
                                     name: if self.tracer_config.debug { Some(function.name.clone()) } else { None },
                                     input_memory: if function.input_memory { Some(step.memory.clone().unwrap().into_bytes()) } else { None },
@@ -297,8 +298,8 @@ impl SentioTraceBuilder {
                             end_index: next_inst_idx,
                             gas: U256::from(step.gas_remaining),
                             gas_used: U256::from(step.gas_cost),
-                            address: Some(node.trace.address.to_string().to_lowercase()),
-                            code_address: Some(step.contract.to_string().to_lowercase()),
+                            address: Some(node.execution_address().to_string().to_lowercase()),
+                            code_address: Some(code_address.to_string().to_lowercase()),
                             topics: Some(Vec::from(log.raw_log.topics())),
                             data: Some(log.raw_log.data.clone()),
                             ..Default::default()
