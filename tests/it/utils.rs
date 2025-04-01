@@ -79,3 +79,4 @@ pub fn inspect_deploy_contract<DB: Database + DatabaseCommit, INSP: Inspector<Co
     });
     output
 }
+

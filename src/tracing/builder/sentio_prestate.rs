@@ -4,14 +4,14 @@ use crate::tracing::{
     types::{CallTraceNode},
 };
 use alloy_primitives::{keccak256, Address, B256, B512};
-use revm::{db::DatabaseRef};
+use revm::DatabaseRef;
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::default::Default;
 use std::fmt::Debug;
 use alloy_rpc_types_trace::geth::{AccountChangeKind};
 use alloy_rpc_types_trace::geth::sentio_prestate::{AccountState, SentioPrestateResult, SentioPrestateTracerConfig, State};
-use revm::interpreter::OpCode;
-use revm::primitives::ResultAndState;
+use crate::tracing::OpCode;
+use revm::context_interface::result::ResultAndState;
 use crate::tracing::utils::{load_account_code};
 
 #[derive(Clone, Debug)]
