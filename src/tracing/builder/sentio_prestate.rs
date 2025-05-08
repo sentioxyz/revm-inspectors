@@ -10,6 +10,7 @@ use std::default::Default;
 use std::fmt::Debug;
 use alloy_rpc_types_trace::geth::{AccountChangeKind};
 use alloy_rpc_types_trace::geth::sentio_prestate::{AccountState, SentioPrestateResult, SentioPrestateTracerConfig, State};
+use revm::context::result::HaltReasonTr;
 use crate::tracing::OpCode;
 use revm::context_interface::result::ResultAndState;
 use crate::tracing::utils::{load_account_code};
@@ -34,7 +35,7 @@ impl SentioPrestateTraceBuilder {
 
     pub fn sentio_prestate_traces<DB: DatabaseRef>(
         &self,
-        ResultAndState { state, .. }: &ResultAndState,
+        ResultAndState { state, .. }: &ResultAndState<impl HaltReasonTr>,
         db: DB,
     ) -> Result<SentioPrestateResult, DB::Error> {
         let account_diffs = state.iter().map(|(addr, acc)| (*addr, acc));
