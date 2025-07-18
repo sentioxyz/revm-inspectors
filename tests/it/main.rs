@@ -16,3 +16,4 @@ mod parity;
 mod transfer;
 #[cfg(feature = "std")]
 mod writer;
+mod sentio;
