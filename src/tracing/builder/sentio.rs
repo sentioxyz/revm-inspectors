@@ -3,10 +3,10 @@
 use crate::tracing::{
     types::{CallTraceNode},
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{keccak256, Address, B256, B512, U256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use alloy_rpc_types_trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig};
+use alloy_rpc_types_trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig, StorageKey};
 use crate::tracing::OpCode;
 use log::warn;
 use crate::tracing::types::{CallTraceStep, TraceMemberOrder};
@@ -132,6 +132,7 @@ impl SentioTraceBuilder {
         }
         let mut entry_found = false;
         let code_address = node.trace.address;
+        let mut prev_sload_frame: Option<SentioTrace> = None;
 
         for i in &node.ordering {
             match i {
@@ -142,6 +143,16 @@ impl SentioTraceBuilder {
                 }
                 TraceMemberOrder::Step(step_idx) => {
                     let step = &trace.steps[*step_idx];
+                    if let Some(ref sload_frame) = prev_sload_frame {
+                        let stack = step.stack.as_ref().unwrap();
+                        let value = B256::from(stack.last().unwrap().to_be_bytes());
+                        frames.last_mut().unwrap().trace.traces.push(Box::from(SentioTrace {
+                            storage_value: Some(value),
+                            ..sload_frame.clone()
+                        }));
+                        prev_sload_frame = None;
+                    }
+
                     last_step = Some(step);
                     last_pc = step.pc;
                     next_inst_idx += 1;
@@ -154,12 +165,23 @@ impl SentioTraceBuilder {
                         root.trace.start_index = next_inst_idx - 1;
                         entry_found = true;
                     }
+                    
+                    let base_frame = SentioTrace {
+                        typ: step.op.to_string(),
+                        pc: last_pc,
+                        start_index: next_inst_idx - 1,
+                        end_index: next_inst_idx,
+                        gas: U256::from(step.gas_remaining),
+                        gas_used: U256::from(step.gas_cost),
+                        ..Default::default()
+                    };
 
-                    if !self.tracer_config.with_internal_calls {
-                        continue;
-                    }
                     match step.op {
                         OpCode::JUMPDEST => {
+                            if !self.tracer_config.with_internal_calls {
+                                continue;
+                            }
+
                             // check internal function exit
                             let mut is_exit = false;
                             for (i, frame) in frames.iter().rev().enumerate() {
@@ -255,19 +277,64 @@ impl SentioTraceBuilder {
                             let [size, offset] = stack.last_chunk::<2>().unwrap();
                             let output = memory.as_bytes().slice(offset.to::<usize>()..(offset + size).to::<usize>());
                             let frame = SentioTrace {
-                                typ: OpCode::REVERT.to_string(),
-                                pc: last_pc,
-                                start_index: next_inst_idx - 1,
-                                end_index: next_inst_idx,
-                                gas: U256::from(step.gas_remaining),
-                                gas_used: U256::from(step.gas_cost),
                                 error: frames.first().unwrap().trace.error.clone(),
                                 output: Some(output),
-                                ..Default::default()
+                                ..base_frame
                             };
                             frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
                         }
-                        _ => {}
+                        OpCode::SLOAD | OpCode::TLOAD => {
+                            let stack = step.stack.as_ref().unwrap();
+                            let slot = B256::from(stack.last().unwrap().to_be_bytes());
+                            prev_sload_frame = Some(SentioTrace {
+                                storage_address: Some(node.execution_address()),
+                                storage_slot: Some(slot),
+                                ..base_frame
+                            });
+                        }
+                        OpCode::SSTORE | OpCode::TSTORE => {
+                            let stack = step.stack.as_ref().unwrap();
+                            let slot = B256::from(stack.last().unwrap().to_be_bytes());
+                            let value = B256::from(stack[stack.len() - 2].to_be_bytes());
+                            let frame = SentioTrace {
+                                storage_address: Some(node.execution_address()),
+                                storage_slot: Some(slot),
+                                storage_value: Some(value),
+                                ..base_frame
+                            };
+                            frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
+                        }
+                        OpCode::KECCAK256 => {
+                            let stack = step.stack.as_ref().unwrap();
+                            let memory = &step.memory.clone().unwrap();
+                            let offset = stack.last().unwrap().to::<usize>();
+                            let raw_key = &memory.as_bytes()[offset..offset + 64];
+                            let key_slot = keccak256(raw_key);
+                            let base_slot = B256::from_slice(&raw_key[32..]);
+                            let key = B256::from_slice(&raw_key[0..32]);
+                            let new_storage_key = StorageKey {
+                                address: node.execution_address(),
+                                code_address,
+                                base_slot,
+                                key_slot,
+                                key
+                            };
+                            let trace = &mut frames.last_mut().unwrap().trace;
+                            if let Some(storage_keys) = &trace.storage_keys {
+                                let mut new_storage_keys = storage_keys.clone();
+                                new_storage_keys.push(new_storage_key);
+                                trace.storage_keys = Some(new_storage_keys);
+                            } else {
+                                trace.storage_keys = Some(vec![new_storage_key]);
+                            }
+                        }
+                        _ => {
+                            if let Some(shall_capture) = self.tracer_config.capture_op_codes.get(&step.op.to_string()) {
+                                if *shall_capture {
+                                    frames.last_mut().unwrap().trace.traces.push(Box::from(base_frame));
+                                }
+                            }
+                        }
                     }
                 }
                 TraceMemberOrder::Log(log_idx) => {
