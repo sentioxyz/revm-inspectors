@@ -439,7 +439,7 @@ impl CallTraceNode {
             revert_reason: None,
             calls: Default::default(),
             logs: Default::default(),
-            start_index: 0,
+            start_index: (),
         };
 
         if self.trace.kind.is_static_call() {
