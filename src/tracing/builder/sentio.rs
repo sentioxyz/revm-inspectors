@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use alloy_rpc_types_trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig, StorageKey};
 use crate::tracing::OpCode;
-use log::{info, warn};
 use crate::tracing::types::{CallTraceStep, TraceMemberOrder};
 use crate::tracing::utils::maybe_revert_reason;
 
@@ -199,9 +198,9 @@ impl SentioTraceBuilder {
                                         let stack = step.stack.as_ref().unwrap();
                                         let output_enough = function.output_size <= stack.len();
                                         if !output_enough {
-                                            warn!("stack size not enough, stack: {}, output_size: {}, address: {}, function: {}, pc: {}", stack.len(), function.output_size, address, function.name, last_pc);
+                                            println!("stack size not enough, stack: {}, output_size: {}, address: {}, function: {}, pc: {}", stack.len(), function.output_size, address, function.name, last_pc);
                                             if step.is_error() {
-                                                warn!("stack size not enough has error, err: {}", step.as_error().unwrap())
+                                                println!("stack size not enough has error, err: {}", step.as_error().unwrap())
                                             }
                                         }
                                         frame.trace = SentioTrace {
@@ -242,17 +241,19 @@ impl SentioTraceBuilder {
                             let stack = step.stack.as_ref().unwrap();
                             let input_enough = function.input_size <= stack.len();
                             if !input_enough {
-                                warn!("stack size not enough, stack: {}, input_size: {}, address: {}, function: {}, pc: {}", stack.len(), function.input_size, address, function.name, last_pc);
+                                println!("stack size not enough, stack: {}, input_size: {}, address: {}, function: {}, pc: {}", stack.len(), function.input_size, address, function.name, last_pc);
                                 if step.is_error() {
-                                    warn!("stack size not enough has error, err: {}", step.as_error().unwrap())
+                                    println!("stack size not enough has error, err: {}", step.as_error().unwrap())
                                 }
                             }
                             let Some(exit_pc) = stack.get(stack.len() - function.input_size - 1) else {
-                                warn!("function entry stack not enough");
+                                println!("function entry stack not enough");
                                 continue;
                             };
-                            println!("internal function entry, address: {}, function: {}, pc: {}, exit_pc: {}, input_size: {}, stack: {:?}",
-                                address, function.name, last_pc, exit_pc, function.input_size, stack.to_vec());
+                            if self.tracer_config.debug {
+                                println!("function entry, address: {}, function: {}, pc: {}, exit_pc: {}, input_size: {}, stack: {:?}",
+                                    address, function.name, last_pc, exit_pc, function.input_size, stack.to_vec());
+                            }
                             let frame = InternalSentioTrace {
                                 trace: SentioTrace {
                                     typ: OpCode::JUMP.to_string(),
@@ -268,7 +269,7 @@ impl SentioTraceBuilder {
                                     input_memory: if function.input_memory { Some(step.memory.clone().unwrap().into_bytes()) } else { None },
                                     ..Default::default()
                                 },
-                                exit_pc: Some(exit_pc.to::<usize>()),
+                                exit_pc: Some(exit_pc.saturating_to::<usize>()), // exit pc can be wrong due to compiler optimization
                                 function: Some(InternalFunctionInfo { function_info: function.clone(), address: address.clone() }),
                             };
                             frames.push(frame);
@@ -399,7 +400,7 @@ impl SentioTraceBuilder {
             frames.last_mut().unwrap().trace.traces.push(Box::from(frame.trace));
         }
         if frames.len() != 1 {
-            warn!("frames size: {}", frames.len());
+            println!("frames size: {}", frames.len());
         }
         let mut ret = frames.remove(0);
         ret.trace.end_index = next_inst_idx;
