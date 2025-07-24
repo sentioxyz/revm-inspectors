@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use alloy_rpc_types_trace::geth::sentio::{FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig, StorageKey};
 use crate::tracing::OpCode;
-use log::warn;
+use log::{info, warn};
 use crate::tracing::types::{CallTraceStep, TraceMemberOrder};
 use crate::tracing::utils::maybe_revert_reason;
 
@@ -251,6 +251,8 @@ impl SentioTraceBuilder {
                                 warn!("function entry stack not enough");
                                 continue;
                             };
+                            println!("internal function entry, address: {}, function: {}, pc: {}, exit_pc: {}, input_size: {}, stack: {:?}",
+                                address, function.name, last_pc, exit_pc, function.input_size, stack.to_vec());
                             let frame = InternalSentioTrace {
                                 trace: SentioTrace {
                                     typ: OpCode::JUMP.to_string(),
@@ -284,6 +286,9 @@ impl SentioTraceBuilder {
                             frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
                         }
                         OpCode::SLOAD | OpCode::TLOAD => {
+                            if !self.tracer_config.with_storage {
+                                continue
+                            }
                             let stack = step.stack.as_ref().unwrap();
                             let slot = B256::from(stack.last().unwrap().to_be_bytes());
                             prev_sload_frame = Some(SentioTrace {
@@ -293,6 +298,9 @@ impl SentioTraceBuilder {
                             });
                         }
                         OpCode::SSTORE | OpCode::TSTORE => {
+                            if !self.tracer_config.with_storage {
+                                continue
+                            }
                             let stack = step.stack.as_ref().unwrap();
                             let slot = B256::from(stack.last().unwrap().to_be_bytes());
                             let value = B256::from(stack[stack.len() - 2].to_be_bytes());
@@ -305,6 +313,9 @@ impl SentioTraceBuilder {
                             frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
                         }
                         OpCode::KECCAK256 => {
+                            if !self.tracer_config.with_storage_keys {
+                                continue
+                            }
                             let stack = step.stack.as_ref().unwrap();
                             let memory = &step.memory.clone().unwrap();
                             let offset = stack.last().unwrap().to::<usize>();
