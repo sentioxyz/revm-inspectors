@@ -8,5 +8,6 @@ pub mod parity;
 
 pub mod sentio;
 
+pub mod sentio_prestate;
 /// Walker types used for traversing various callgraphs
 mod walker;
