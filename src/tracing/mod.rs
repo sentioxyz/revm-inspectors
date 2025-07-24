@@ -32,6 +32,7 @@ mod builder;
 pub use builder::{
     geth::{self, GethTraceBuilder},
     parity::{self, ParityTraceBuilder},
+    sentio::{SentioPrestateTraceBuilder, SentioTraceBuilder},
 };
 
 mod config;
