@@ -95,6 +95,11 @@ impl MuxInspector {
                     // keep this so that new variants can be supported
                     return Err(Error::UnexpectedConfig(tracer_type));
                 }
+                GethDebugBuiltInTracerType::SentioTracer |
+                GethDebugBuiltInTracerType::SentioPrestateTracer |
+                GethDebugBuiltInTracerType::SentioRethRawTracer => {
+                    return Err(Error::UnexpectedConfig(tracer_type));
+                }
             }
         }
 
