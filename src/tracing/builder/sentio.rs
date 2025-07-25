@@ -1,10 +1,10 @@
 //! Sentio trace builder
 
-use crate::tracing::types::CallTraceNode;
+use crate::tracing::types::{CallTraceNode, RecordedMemory};
 use crate::tracing::types::{CallTraceStep, TraceMemberOrder};
 use crate::tracing::utils::maybe_revert_reason;
-use crate::tracing::OpCode;
-use alloy_primitives::{keccak256, Address, B256, U256};
+use crate::tracing::{EvalCtx, Expr, OpCode};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_trace::geth::sentio::{
     FunctionInfo, SentioReceipt, SentioTrace, SentioTracerConfig, StorageKey,
 };
@@ -22,6 +22,10 @@ pub struct SentioTraceBuilder {
     call_map: HashMap<Address, HashSet<usize>>,
 
     tracer_config: SentioTracerConfig,
+
+    extra_capture_rules: Vec<Expr>,
+
+    origin: Address,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,7 +44,11 @@ pub struct InternalFunctionInfo {
 }
 
 impl SentioTraceBuilder {
-    pub fn new(nodes: Vec<CallTraceNode>, config: SentioTracerConfig) -> Self {
+    pub fn new(
+        nodes: Vec<CallTraceNode>,
+        origin: Option<Address>,
+        config: SentioTracerConfig,
+    ) -> Self {
         let tracer_config = config.clone();
         let mut function_map: HashMap<Address, HashMap<usize, InternalFunctionInfo>> =
             HashMap::new();
@@ -58,7 +66,10 @@ impl SentioTraceBuilder {
             let pc_set = pcs.into_iter().collect();
             call_map.insert(address, pc_set);
         }
-        Self { nodes, function_map, call_map, tracer_config }
+        let extra_capture_rules =
+            config.extra_capture_rules.iter().map(|e| Expr::new(e).unwrap()).collect::<Vec<Expr>>();
+        let origin = origin.unwrap_or(nodes[0].trace.caller);
+        Self { nodes, function_map, call_map, extra_capture_rules, origin, tracer_config }
     }
 
     pub fn sentio_traces(
@@ -192,7 +203,7 @@ impl SentioTraceBuilder {
                         entry_found = true;
                     }
 
-                    let base_frame = SentioTrace {
+                    let base_frame = || SentioTrace {
                         typ: step.op.to_string(),
                         pc: last_pc,
                         start_index: next_inst_idx - 1,
@@ -332,13 +343,14 @@ impl SentioTraceBuilder {
                             let stack = step.stack.as_ref().unwrap();
                             let memory = step.memory.as_ref().unwrap();
                             let [size, offset] = stack.last_chunk::<2>().unwrap();
-                            let output = memory
-                                .as_bytes()
-                                .slice(offset.to::<usize>()..(offset + size).to::<usize>());
                             let frame = SentioTrace {
                                 error: frames.first().unwrap().trace.error.clone(),
-                                output: Some(output),
-                                ..base_frame
+                                output: Some(copy_memory(
+                                    memory,
+                                    offset.to::<usize>(),
+                                    size.to::<usize>(),
+                                )),
+                                ..base_frame()
                             };
                             frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
                         }
@@ -351,7 +363,7 @@ impl SentioTraceBuilder {
                             prev_sload_frame = Some(SentioTrace {
                                 storage_address: Some(node.execution_address()),
                                 storage_slot: Some(slot),
-                                ..base_frame
+                                ..base_frame()
                             });
                         }
                         OpCode::SSTORE | OpCode::TSTORE => {
@@ -365,7 +377,7 @@ impl SentioTraceBuilder {
                                 storage_address: Some(node.execution_address()),
                                 storage_slot: Some(slot),
                                 storage_value: Some(value),
-                                ..base_frame
+                                ..base_frame()
                             };
                             frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
                         }
@@ -396,20 +408,46 @@ impl SentioTraceBuilder {
                                 trace.storage_keys = Some(vec![new_storage_key]);
                             }
                         }
-                        _ => {
-                            if let Some(shall_capture) =
-                                self.tracer_config.capture_op_codes.get(&step.op.to_string())
-                            {
-                                if *shall_capture {
-                                    frames
-                                        .last_mut()
-                                        .unwrap()
-                                        .trace
-                                        .traces
-                                        .push(Box::from(base_frame));
+                        _ => {}
+                    }
+
+                    if !self.extra_capture_rules.is_empty() {
+                        let mut match_rule_ids = vec![];
+                        let ctx = EvalCtx {
+                            step,
+                            call_node: node,
+                            stack: step.stack.as_ref().unwrap(),
+                            origin: &self.origin,
+                            debug: self.tracer_config.debug,
+                        };
+                        for (i, rule) in self.extra_capture_rules.iter().enumerate() {
+                            match rule.eval(&ctx) {
+                                Ok(result) => {
+                                    if result == "true" {
+                                        match_rule_ids.push(i);
+                                    }
+                                }
+                                Err(err) => {
+                                    if self.tracer_config.debug {
+                                        println!(
+                                            "error evaluating extra capture rule {}: {}",
+                                            i, err
+                                        );
+                                    }
+                                    continue;
                                 }
                             }
                         }
+                        if match_rule_ids.is_empty() {
+                            continue;
+                        }
+                        let frame = SentioTrace {
+                            match_rule_ids: Some(match_rule_ids),
+                            stack: step.stack.clone(),
+                            memory: step.memory.clone().map(|m| m.memory_chunks()),
+                            ..base_frame()
+                        };
+                        frames.last_mut().unwrap().trace.traces.push(Box::from(frame));
                     }
                 }
                 TraceMemberOrder::Log(log_idx) => {
@@ -477,4 +515,21 @@ fn copy_stack(stack: &Vec<U256>, size: usize) -> Vec<U256> {
     let mut input_stack = vec![U256::ZERO; stack.len() - size];
     input_stack.append(&mut stack[stack.len() - size..].to_vec());
     input_stack
+}
+
+fn copy_memory(memory: &RecordedMemory, offset: usize, size: usize) -> Bytes {
+    if size == 0 {
+        return Bytes::new();
+    }
+    if offset + size > memory.as_bytes().len() {
+        println!(
+            "memory out of bounds: offset: {}, size: {}, memory size: {}",
+            offset,
+            size,
+            memory.as_bytes().len()
+        );
+        memory.as_bytes().slice(offset..)
+    } else {
+        memory.as_bytes().slice(offset..offset + size)
+    }
 }
