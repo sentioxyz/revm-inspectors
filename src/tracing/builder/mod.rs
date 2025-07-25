@@ -6,8 +6,8 @@ pub mod geth;
 /// Parity style trace builders for `trace_` namespace
 pub mod parity;
 
+pub mod expr;
 pub mod sentio;
-
 pub mod sentio_prestate;
 /// Walker types used for traversing various callgraphs
 mod walker;
