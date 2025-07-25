@@ -240,19 +240,11 @@ impl SentioTraceBuilder {
                                             end_index: next_inst_idx - 1,
                                             gas_used: frame.trace.gas
                                                 - U256::from(step.gas_remaining),
-                                            output_stack: if output_enough {
-                                                Some(
-                                                    stack[stack.len() - function.output_size..]
-                                                        .to_vec(),
-                                                )
-                                            } else {
-                                                None
-                                            },
-                                            output_memory: if function.output_memory {
-                                                Some(step.memory.clone().unwrap().into_bytes())
-                                            } else {
-                                                None
-                                            },
+                                            output_stack: output_enough
+                                                .then(|| copy_stack(stack, function.output_size)),
+                                            output_memory: function.output_memory.then(|| {
+                                                step.memory.clone().unwrap().memory_chunks()
+                                            }),
                                             ..frame.trace
                                         };
                                         frames
@@ -320,21 +312,12 @@ impl SentioTraceBuilder {
                                     from: Some(code_address.to_string().to_lowercase()),
                                     to: None,
                                     code_address: Some(code_address.to_string().to_lowercase()),
-                                    input_stack: if input_enough {
-                                        Some(stack[stack.len() - function.input_size..].to_vec())
-                                    } else {
-                                        None
-                                    },
-                                    name: if self.tracer_config.debug {
-                                        Some(function.name.clone())
-                                    } else {
-                                        None
-                                    },
-                                    input_memory: if function.input_memory {
-                                        Some(step.memory.clone().unwrap().into_bytes())
-                                    } else {
-                                        None
-                                    },
+                                    input_stack: input_enough
+                                        .then(|| copy_stack(stack, function.input_size)),
+                                    input_memory: function
+                                        .input_memory
+                                        .then(|| step.memory.clone().unwrap().memory_chunks()),
+                                    name: self.tracer_config.debug.then(|| function.name.clone()),
                                     ..Default::default()
                                 },
                                 exit_pc: Some(exit_pc.saturating_to::<usize>()), // exit pc can be wrong due to compiler optimization
@@ -488,4 +471,10 @@ impl SentioTraceBuilder {
         ret.trace.end_index = next_inst_idx;
         ret
     }
+}
+
+fn copy_stack(stack: &Vec<U256>, size: usize) -> Vec<U256> {
+    let mut input_stack = vec![U256::ZERO; stack.len() - size];
+    input_stack.append(&mut stack[stack.len() - size..].to_vec());
+    input_stack
 }
