@@ -30,6 +30,7 @@ pub use arena::CallTraceArena;
 
 mod builder;
 pub use builder::{
+    expr::{EvalCtx, Expr},
     geth::{self, GethTraceBuilder},
     parity::{self, ParityTraceBuilder},
     sentio::SentioTraceBuilder,
