@@ -388,7 +388,11 @@ impl SentioTraceBuilder {
                             let stack = step.stack.as_ref().unwrap();
                             let memory = &step.memory.clone().unwrap();
                             let offset = stack.last().unwrap().to::<usize>();
-                            let raw_key = &memory.as_bytes()[offset..offset + 64];
+                            let size = stack[stack.len() - 2].to::<usize>();
+                            if size != 64 {
+                                continue;
+                            }
+                            let raw_key = &memory.as_bytes()[offset..offset + size];
                             let key_slot = keccak256(raw_key);
                             let base_slot = B256::from_slice(&raw_key[32..]);
                             let key = B256::from_slice(&raw_key[0..32]);
