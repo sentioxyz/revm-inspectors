@@ -1,10 +1,12 @@
-use alloy_primitives::U256;
+use alloy_primitives::{map::HashSet, U256};
 use alloy_rpc_types_trace::{
-    geth::{CallConfig, GethDefaultTracingOptions, PreStateConfig},
+    geth::{
+        erc7562::Erc7562Config, CallConfig, FlatCallConfig, GethDefaultTracingOptions,
+        PreStateConfig,
+    },
     parity::TraceType,
 };
-use revm::interpreter::OpCode;
-use std::collections::HashSet;
+use revm::bytecode::opcode::OpCode;
 
 /// 256 bits each marking whether an opcode should be included into steps trace or not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +85,7 @@ impl TracingInspectorConfig {
             record_steps: true,
             record_memory_snapshots: true,
             record_stack_snapshots: StackSnapshotType::Full,
-            record_state_diff: false,
+            record_state_diff: true,
             record_returndata_snapshots: true,
             record_opcodes_filter: None,
             exclude_precompile_calls: false,
@@ -92,7 +94,7 @@ impl TracingInspectorConfig {
         }
     }
 
-    /// Returns a config with everything is disabled.
+    /// Returns a config with everything disabled.
     pub const fn none() -> Self {
         Self {
             record_steps: false,
@@ -122,6 +124,26 @@ impl TracingInspectorConfig {
             record_opcodes_filter: None,
             record_immediate_bytes: false,
         }
+    }
+
+    /// Returns the [`TracingInspectorConfig`] for [`TraceType::StateDiff`].
+    ///
+    /// This is the same as [`Self::default_parity`]
+    ///
+    /// Note: the parity statediffs can be populated entirely via the execution result, so we don't
+    /// need statediff recording
+    pub const fn parity_statediff() -> Self {
+        Self::default_parity()
+    }
+
+    /// Returns the [`TracingInspectorConfig`] for [`TraceType::VmTrace`].
+    pub const fn parity_vm_trace() -> Self {
+        Self::default_parity()
+            .set_steps(true)
+            .set_stack_snapshots(StackSnapshotType::Pushes)
+            .set_memory_snapshots(true)
+            // also need statediffs for recording altered storage in `VmExecutedOperation.store`
+            .set_state_diffs(true)
     }
 
     /// Returns a config for geth style traces.
@@ -188,6 +210,33 @@ impl TracingInspectorConfig {
             .set_record_logs(config.with_log.unwrap_or_default())
     }
 
+    /// Returns a config for geth's
+    /// [Erc7562Frame](alloy_rpc_types_trace::geth::erc7562::Erc7562Frame).
+    #[inline]
+    pub fn from_geth_erc7562_config(config: &Erc7562Config) -> Self {
+        Self::none()
+            // call tracer is similar parity tracer with optional support for logs
+            .set_record_logs(config.with_log.unwrap_or_default())
+            // need memory snapshots for keccak preimages
+            .set_memory_snapshots(true)
+            // need stack snapshots for keccak preimages
+            .set_stack_snapshots(StackSnapshotType::Full)
+            .steps()
+    }
+
+    /// Returns a config for geth's
+    /// [FlatCallTracer](alloy_rpc_types_trace::geth::call::FlatCallFrame).
+    ///
+    /// This returns [Self::default_parity] and sets
+    /// [TracingInspectorConfig::exclude_precompile_calls] if configured in the given
+    /// [FlatCallConfig]
+    #[inline]
+    pub fn from_flat_call_config(config: &FlatCallConfig) -> Self {
+        Self::default_parity()
+            // call tracer is similar parity tracer with optional support for logs
+            .set_exclude_precompile_calls(!config.include_precompiles.unwrap_or_default())
+    }
+
     /// Returns a config for geth's [PrestateTracer](alloy_rpc_types_trace::geth::PreStateFrame).
     ///
     /// Note: This currently returns [Self::none] because the prestate tracer result currently
@@ -196,6 +245,21 @@ impl TracingInspectorConfig {
     #[inline]
     pub const fn from_geth_prestate_config(_config: &PreStateConfig) -> Self {
         Self::none()
+    }
+
+    /// Merge another config into this one.
+    #[inline]
+    pub fn merge(&mut self, other: Self) -> &mut Self {
+        self.record_steps |= other.record_steps;
+        self.record_memory_snapshots |= other.record_memory_snapshots;
+        self.record_stack_snapshots = other.record_stack_snapshots;
+        self.record_state_diff |= other.record_state_diff;
+        self.record_returndata_snapshots |= other.record_returndata_snapshots;
+        self.exclude_precompile_calls |= other.exclude_precompile_calls;
+        self.record_logs |= other.record_logs;
+        self.record_opcodes_filter = self.record_opcodes_filter.or(other.record_opcodes_filter);
+        self.record_immediate_bytes |= other.record_immediate_bytes;
+        self
     }
 
     /// Configure whether calls to precompiles should be ignored.
@@ -313,7 +377,7 @@ impl TracingInspectorConfig {
     /// Otherwise, always returns true.
     #[inline]
     pub fn should_record_opcode(&self, op: OpCode) -> bool {
-        self.record_opcodes_filter.as_ref().map_or(true, |filter| filter.is_enabled(op))
+        self.record_opcodes_filter.as_ref().is_none_or(|filter| filter.is_enabled(op))
     }
 }
 
@@ -323,6 +387,8 @@ pub enum StackSnapshotType {
     /// Don't record stack snapshots
     #[default]
     None,
+    /// Record full, push stack
+    All,
     /// Record only the items pushed to the stack
     Pushes,
     /// Record the full stack
@@ -330,6 +396,12 @@ pub enum StackSnapshotType {
 }
 
 impl StackSnapshotType {
+    /// Returns true if this is the [StackSnapshotType::All] variant
+    #[inline]
+    pub const fn is_all(self) -> bool {
+        matches!(self, Self::All)
+    }
+
     /// Returns true if this is the [StackSnapshotType::Full] variant
     #[inline]
     pub const fn is_full(self) -> bool {
@@ -368,25 +440,36 @@ mod tests {
 
     #[test]
     fn test_parity_config() {
-        let mut s = HashSet::new();
+        let mut s = HashSet::default();
         s.insert(TraceType::StateDiff);
         let config = TracingInspectorConfig::from_parity_config(&s);
         // not required
         assert!(!config.record_steps);
         assert!(!config.record_state_diff);
 
-        let mut s = HashSet::new();
+        let mut s = HashSet::default();
         s.insert(TraceType::VmTrace);
         let config = TracingInspectorConfig::from_parity_config(&s);
         assert!(config.record_steps);
         assert!(!config.record_state_diff);
 
-        let mut s = HashSet::new();
+        let mut s = HashSet::default();
         s.insert(TraceType::VmTrace);
         s.insert(TraceType::StateDiff);
         let config = TracingInspectorConfig::from_parity_config(&s);
         assert!(config.record_steps);
         // not required for StateDiff
         assert!(!config.record_state_diff);
+    }
+
+    #[test]
+    fn test_flat_call_config() {
+        let config = FlatCallConfig { include_precompiles: Some(true), ..Default::default() };
+        let config = TracingInspectorConfig::from_flat_call_config(&config);
+        assert!(!config.exclude_precompile_calls);
+
+        let config = FlatCallConfig { include_precompiles: Some(false), ..Default::default() };
+        let config = TracingInspectorConfig::from_flat_call_config(&config);
+        assert!(config.exclude_precompile_calls);
     }
 }

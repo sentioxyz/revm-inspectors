@@ -1,19 +1,29 @@
 //! Geth trace builder
-
 use crate::tracing::{
-    types::{CallTraceNode, CallTraceStepStackItem},
+    types::{CallKind, CallTraceNode, CallTraceStepStackItem},
     utils::load_account_code,
-    TracingInspectorConfig,
 };
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloc::{
+    borrow::Cow,
+    collections::{BTreeMap, VecDeque},
+    format, vec,
+    vec::Vec,
+};
+use alloy_primitives::{
+    map::{Entry, HashMap},
+    Address, Bytes, B256, U256,
+};
 use alloy_rpc_types_trace::geth::{
+    erc7562::{AccessedSlots, CallFrameType, ContractSize, Erc7562Config, Erc7562Frame},
     AccountChangeKind, AccountState, CallConfig, CallFrame, DefaultFrame, DiffMode,
     GethDefaultTracingOptions, PreStateConfig, PreStateFrame, PreStateMode, StructLog,
 };
-use revm::{db::DatabaseRef, primitives::ResultAndState};
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashMap, VecDeque},
+use revm::{
+    bytecode::opcode,
+    context_interface::result::{HaltReasonTr, ResultAndState},
+    primitives::KECCAK_EMPTY,
+    state::EvmState,
+    DatabaseRef,
 };
 
 /// A type for creating geth style traces
@@ -21,32 +31,29 @@ use std::{
 pub struct GethTraceBuilder<'a> {
     /// Recorded trace nodes.
     nodes: Cow<'a, [CallTraceNode]>,
-    /// How the traces were recorded
-    _config: TracingInspectorConfig,
 }
 
 impl GethTraceBuilder<'static> {
     /// Returns a new instance of the builder from [`Cow::Owned`]
-    pub fn new(
-        nodes: Vec<CallTraceNode>,
-        _config: TracingInspectorConfig,
-    ) -> GethTraceBuilder<'static> {
-        Self { nodes: Cow::Owned(nodes), _config }
+    pub fn new(nodes: Vec<CallTraceNode>) -> GethTraceBuilder<'static> {
+        Self { nodes: Cow::Owned(nodes) }
     }
 }
 
 impl<'a> GethTraceBuilder<'a> {
     /// Returns a new instance of the builder from [`Cow::Borrowed`]
-    pub fn new_borrowed(
-        nodes: &'a Vec<CallTraceNode>,
-        _config: TracingInspectorConfig,
-    ) -> GethTraceBuilder<'a> {
-        Self { nodes: Cow::Borrowed(nodes), _config }
+    pub fn new_borrowed(nodes: &'a [CallTraceNode]) -> GethTraceBuilder<'a> {
+        Self { nodes: Cow::Borrowed(nodes) }
     }
 
     /// Consumes the builder and returns the recorded trace nodes.
     pub fn to_owned(self) -> Vec<CallTraceNode> {
         self.nodes.into_owned()
+    }
+
+    /// Returns the sum of all steps in the recorded node traces.
+    fn trace_step_count(&self) -> usize {
+        self.nodes.iter().map(|node| node.trace.steps.len()).sum()
     }
 
     /// Fill in the geth trace with all steps of the trace and its children traces in the order they
@@ -102,7 +109,8 @@ impl<'a> GethTraceBuilder<'a> {
     /// Generate a geth-style trace e.g. for `debug_traceTransaction`
     ///
     /// This expects the gas used and return value for the
-    /// [ExecutionResult](revm::primitives::ExecutionResult) of the executed transaction.
+    /// [[revm::context::result::ExecutionResult]] of the executed
+    /// transaction.
     pub fn geth_traces(
         &self,
         receipt_gas_used: u64,
@@ -116,8 +124,8 @@ impl<'a> GethTraceBuilder<'a> {
         let main_trace_node = &self.nodes[0];
         let main_trace = &main_trace_node.trace;
 
-        let mut struct_logs = Vec::new();
-        let mut storage = HashMap::new();
+        let mut struct_logs = Vec::with_capacity(self.trace_step_count());
+        let mut storage = HashMap::default();
         self.fill_geth_trace(main_trace_node, &opts, &mut storage, &mut struct_logs);
 
         DefaultFrame {
@@ -134,7 +142,8 @@ impl<'a> GethTraceBuilder<'a> {
     /// This decodes all call frames from the recorded traces.
     ///
     /// This expects the gas used and return value for the
-    /// [ExecutionResult](revm::primitives::ExecutionResult) of the executed transaction.
+    /// [revm::context::result::ExecutionResult] of the executed
+    /// transaction.
     pub fn geth_call_traces(&self, opts: CallConfig, gas_used: u64) -> CallFrame {
         if self.nodes.is_empty() {
             return Default::default();
@@ -222,78 +231,105 @@ impl<'a> GethTraceBuilder<'a> {
     /// * `db` - The database to fetch state pre-transaction execution.
     pub fn geth_prestate_traces<DB: DatabaseRef>(
         &self,
-        ResultAndState { state, .. }: &ResultAndState,
+        ResultAndState { state, .. }: &ResultAndState<impl HaltReasonTr>,
         prestate_config: &PreStateConfig,
         db: DB,
     ) -> Result<PreStateFrame, DB::Error> {
+        let code_enabled = prestate_config.code_enabled();
+        let storage_enabled = prestate_config.storage_enabled();
+        if prestate_config.is_diff_mode() {
+            self.geth_prestate_diff_traces(state, db, code_enabled, storage_enabled)
+        } else {
+            self.geth_prestate_pre_traces(state, db, code_enabled, storage_enabled)
+        }
+    }
+
+    fn geth_prestate_pre_traces<DB: DatabaseRef>(
+        &self,
+        state: &EvmState,
+        db: DB,
+        code_enabled: bool,
+        storage_enabled: bool,
+    ) -> Result<PreStateFrame, DB::Error> {
         let account_diffs = state.iter().map(|(addr, acc)| (*addr, acc));
+        let mut prestate = PreStateMode::default();
 
-        if prestate_config.is_default_mode() {
-            let mut prestate = PreStateMode::default();
-            // we only want changed accounts for things like balance changes etc
-            for (addr, changed_acc) in account_diffs {
-                let db_acc = db.basic_ref(addr)?.unwrap_or_default();
-                let code = load_account_code(&db, &db_acc);
-                let mut acc_state =
-                    AccountState::from_account_info(db_acc.nonce, db_acc.balance, code);
+        // we only want changed accounts for things like balance changes etc
+        for (addr, changed_acc) in account_diffs {
+            let db_acc = db.basic_ref(addr)?.unwrap_or_default();
+            let code = code_enabled.then(|| load_account_code(&db, &db_acc)).flatten();
+            let mut acc_state = AccountState::from_account_info(db_acc.nonce, db_acc.balance, code);
 
-                // insert the original value of all modified storage slots
+            // insert the original value of all modified storage slots
+            if storage_enabled {
                 for (key, slot) in changed_acc.storage.iter() {
                     acc_state.storage.insert((*key).into(), slot.original_value.into());
                 }
-
-                prestate.0.insert(addr, acc_state);
             }
 
-            Ok(PreStateFrame::Default(prestate))
-        } else {
-            let mut state_diff = DiffMode::default();
-            let mut account_change_kinds = HashMap::with_capacity(account_diffs.len());
-            for (addr, changed_acc) in account_diffs {
-                let db_acc = db.basic_ref(addr)?.unwrap_or_default();
+            prestate.0.insert(addr, acc_state);
+        }
 
-                let pre_code = load_account_code(&db, &db_acc);
+        Ok(PreStateFrame::Default(prestate))
+    }
 
-                let mut pre_state =
-                    AccountState::from_account_info(db_acc.nonce, db_acc.balance, pre_code);
+    fn geth_prestate_diff_traces<DB: DatabaseRef>(
+        &self,
+        state: &EvmState,
+        db: DB,
+        code_enabled: bool,
+        storage_enabled: bool,
+    ) -> Result<PreStateFrame, DB::Error> {
+        let account_diffs = state.iter().map(|(addr, acc)| (*addr, acc));
+        let mut state_diff = DiffMode::default();
+        let mut account_change_kinds =
+            HashMap::with_capacity_and_hasher(account_diffs.len(), Default::default());
+        for (addr, changed_acc) in account_diffs {
+            let db_acc = db.basic_ref(addr)?.unwrap_or_default();
 
-                let mut post_state = AccountState::from_account_info(
-                    changed_acc.info.nonce,
-                    changed_acc.info.balance,
-                    changed_acc.info.code.as_ref().map(|code| code.original_bytes()),
-                );
+            let pre_code = code_enabled.then(|| load_account_code(&db, &db_acc)).flatten();
 
-                // handle storage changes
+            let mut pre_state =
+                AccountState::from_account_info(db_acc.nonce, db_acc.balance, pre_code);
+
+            let mut post_state = AccountState::from_account_info(
+                changed_acc.info.nonce,
+                changed_acc.info.balance,
+                changed_acc.info.code.as_ref().map(|code| code.original_bytes()),
+            );
+
+            // handle storage changes
+            if storage_enabled {
                 for (key, slot) in changed_acc.storage.iter().filter(|(_, slot)| slot.is_changed())
                 {
                     pre_state.storage.insert((*key).into(), slot.original_value.into());
                     post_state.storage.insert((*key).into(), slot.present_value.into());
                 }
-
-                state_diff.pre.insert(addr, pre_state);
-                state_diff.post.insert(addr, post_state);
-
-                // determine the change type
-                let pre_change = if changed_acc.is_created() {
-                    AccountChangeKind::Create
-                } else {
-                    AccountChangeKind::Modify
-                };
-                let post_change = if changed_acc.is_selfdestructed() {
-                    AccountChangeKind::SelfDestruct
-                } else {
-                    AccountChangeKind::Modify
-                };
-
-                account_change_kinds.insert(addr, (pre_change, post_change));
             }
 
-            // ensure we're only keeping changed entries
-            state_diff.retain_changed().remove_zero_storage_values();
+            state_diff.pre.insert(addr, pre_state);
+            state_diff.post.insert(addr, post_state);
 
-            self.diff_traces(&mut state_diff.pre, &mut state_diff.post, account_change_kinds);
-            Ok(PreStateFrame::Diff(state_diff))
+            // determine the change type
+            let pre_change = if changed_acc.is_created() {
+                AccountChangeKind::Create
+            } else {
+                AccountChangeKind::Modify
+            };
+            let post_change = if changed_acc.is_selfdestructed() {
+                AccountChangeKind::SelfDestruct
+            } else {
+                AccountChangeKind::Modify
+            };
+
+            account_change_kinds.insert(addr, (pre_change, post_change));
         }
+
+        // ensure we're only keeping changed entries
+        state_diff.retain_changed().remove_zero_storage_values();
+
+        self.diff_traces(&mut state_diff.pre, &mut state_diff.post, account_change_kinds);
+        Ok(PreStateFrame::Diff(state_diff))
     }
 
     /// Returns the difference between the pre and post state of the transaction depending on the
@@ -322,5 +358,200 @@ impl<'a> GethTraceBuilder<'a> {
             // only keep accounts that are not created
             change_type.get(addr).map(|ty| !ty.0.is_created()).unwrap_or(true)
         });
+    }
+
+    /// Traces ERC-7562 calls using the call tracer.
+    pub fn geth_erc7562_traces<DB: DatabaseRef>(
+        &self,
+        opts: Erc7562Config,
+        gas_used: u64,
+        db: DB,
+    ) -> Erc7562Frame {
+        if self.nodes.is_empty() {
+            return Default::default();
+        }
+
+        let include_logs = opts.with_log.unwrap_or_default();
+        let call_config = CallConfig { only_top_call: None, with_log: Some(include_logs) };
+
+        let mut top_call = Some(self.geth_call_traces(call_config, gas_used));
+
+        let mut frames: Vec<(usize, Erc7562Frame)> = Vec::with_capacity(self.nodes.len());
+
+        for (idx, node) in self.nodes.iter().enumerate() {
+            let trace = &node.trace;
+
+            let mut accessed_slots = AccessedSlots::default();
+            let mut used_opcodes = HashMap::default();
+            let mut contract_size = HashMap::default();
+            let mut ext_code_access_info = Vec::new();
+            let mut keccak = Vec::new();
+            let mut out_of_gas = false;
+
+            for step in &trace.steps {
+                let op = step.op.get();
+
+                // Skip if opcode is ignored
+                if opts.ignored_opcodes.contains(&op) {
+                    continue;
+                }
+
+                // Count used opcodes
+                *used_opcodes.entry(op).or_insert(0) += 1;
+
+                // Accessed storage slots
+                match op {
+                    opcode::SLOAD => {
+                        if let Some(stack) = &step.stack {
+                            if let Some(slot) = stack.get(stack.len().saturating_sub(1)) {
+                                let slot: B256 = (*slot).into();
+                                let already_read = accessed_slots.reads.contains_key(&slot);
+                                let already_written = accessed_slots.writes.contains_key(&slot);
+                                if !already_read && !already_written {
+                                    if let Some(change) = &step.storage_change {
+                                        let value: B256 = change.value.into();
+                                        accessed_slots.reads.entry(slot).or_default().push(value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    opcode::SSTORE => {
+                        if let Some(stack) = &step.stack {
+                            if let Some(slot) = stack.get(stack.len().saturating_sub(1)) {
+                                let slot: B256 = (*slot).into();
+                                *accessed_slots.writes.entry(slot).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    opcode::TLOAD => {
+                        if let Some(stack) = &step.stack {
+                            if let Some(slot) = stack.get(stack.len().saturating_sub(1)) {
+                                let slot: B256 = (*slot).into();
+                                *accessed_slots.transient_reads.entry(slot).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    opcode::TSTORE => {
+                        if let Some(stack) = &step.stack {
+                            if let Some(slot) = stack.get(stack.len().saturating_sub(1)) {
+                                let slot: B256 = (*slot).into();
+                                *accessed_slots.transient_writes.entry(slot).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if let Some(status) = &step.status {
+                    if *status == revm::interpreter::InstructionResult::OutOfGas {
+                        out_of_gas = true;
+                    }
+                }
+
+                if matches!(op, opcode::EXTCODESIZE | opcode::EXTCODECOPY | opcode::EXTCODEHASH) {
+                    if let Some(stack) = &step.stack {
+                        if let Some(item) = stack.get(stack.len().saturating_sub(1)) {
+                            let address = Address::from(item.to_be_bytes());
+                            ext_code_access_info.push(format!("{address:?}"));
+                            if let Entry::Vacant(e) = contract_size.entry(address) {
+                                if let Ok(Some(account)) = db.basic_ref(address) {
+                                    if account.code_hash != KECCAK_EMPTY {
+                                        if let Ok(bytecode) = db.code_by_hash_ref(account.code_hash)
+                                        {
+                                            e.insert(ContractSize {
+                                                contract_size: bytecode.original_bytes().len()
+                                                    as u64,
+                                                opcode: op,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // KECCAK preimages from returndata
+                if op == opcode::KECCAK256 && !out_of_gas {
+                    if let (Some(stack), Some(memory)) = (&step.stack, &step.memory) {
+                        if stack.len() >= 2 {
+                            let offset = stack[stack.len() - 1];
+                            let len = stack[stack.len() - 2];
+                            if let (Ok(offset), Ok(len)) =
+                                (usize::try_from(offset), usize::try_from(len))
+                            {
+                                let mut data = vec![0; len];
+                                if offset < memory.0.len() {
+                                    let end = (offset + len).min(memory.0.len());
+                                    let copy_len = end - offset;
+                                    data[..copy_len].copy_from_slice(&memory.0[offset..end]);
+                                }
+                                keccak.push(Bytes::from(data));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let call_frame = if idx == 0 {
+                top_call.take().unwrap()
+            } else {
+                let include_logs = include_logs && !self.call_or_parent_failed(node);
+                self.nodes[idx].geth_empty_call_frame(include_logs)
+            };
+
+            let call_frame_type = Self::convert_call_kind(node.kind());
+
+            frames.push((
+                idx,
+                Erc7562Frame {
+                    call_frame_type,
+                    from: call_frame.from,
+                    gas: call_frame.gas.to(),
+                    gas_used: call_frame.gas_used.to(),
+                    to: call_frame.to,
+                    input: call_frame.input,
+                    output: call_frame.output,
+                    error: call_frame.error,
+                    revert_reason: call_frame.revert_reason,
+                    logs: call_frame.logs,
+                    value: call_frame.value,
+                    accessed_slots,
+                    ext_code_access_info,
+                    used_opcodes,
+                    contract_size,
+                    out_of_gas,
+                    keccak,
+                    calls: vec![],
+                },
+            ));
+        }
+
+        // Assemble tree
+        loop {
+            let (idx, frame) = frames.pop().expect("call frames not empty");
+            let node = &self.nodes[idx];
+            if let Some(parent) = node.parent {
+                let parent_frame = &mut frames[parent];
+                parent_frame.1.calls.insert(0, frame);
+            } else {
+                debug_assert!(frames.is_empty(), "only one root node has no parent");
+                return frame;
+            }
+        }
+    }
+
+    /// Converts a CallKind to a CallFrameType.
+    pub fn convert_call_kind(kind: CallKind) -> CallFrameType {
+        match kind {
+            CallKind::Call => CallFrameType::Call,
+            CallKind::CallCode => CallFrameType::CallCode,
+            CallKind::DelegateCall => CallFrameType::DelegateCall,
+            CallKind::StaticCall => CallFrameType::StaticCall,
+            CallKind::Create => CallFrameType::Create,
+            CallKind::Create2 => CallFrameType::Create2,
+            CallKind::AuthCall => CallFrameType::Call,
+        }
     }
 }

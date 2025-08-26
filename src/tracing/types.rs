@@ -1,17 +1,25 @@
 //! Types for representing call trace items.
 
 use crate::tracing::{config::TraceStyle, utils, utils::convert_memory};
+use alloc::{
+    collections::VecDeque,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 pub use alloy_primitives::Log;
 use alloy_primitives::{Address, Bytes, FixedBytes, LogData, U256};
 use alloy_rpc_types_trace::{
     geth::{CallFrame, CallLogFrame, GethDefaultTracingOptions, StructLog},
     parity::{
         Action, ActionType, CallAction, CallOutput, CallType, CreateAction, CreateOutput,
-        SelfdestructAction, TraceOutput, TransactionTrace,
+        CreationMethod, SelfdestructAction, TraceOutput, TransactionTrace,
     },
 };
-use revm::interpreter::{opcode, CallScheme, CreateScheme, InstructionResult, OpCode};
-use std::collections::VecDeque;
+use revm::{
+    bytecode::opcode::{self, OpCode},
+    interpreter::{CallScheme, CreateScheme, InstructionResult},
+};
 
 /// Decoded call data.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -48,7 +56,6 @@ pub struct CallTrace {
     /// The target address of this call.
     ///
     /// This is:
-    /// - [`is_selfdestruct`](Self::is_selfdestruct): the address of the selfdestructed contract
     /// - [`CallKind::Call`] and alike: the callee, the address of the contract being called
     /// - [`CallKind::Create`] and alike: the address of the created contract
     pub address: Address,
@@ -56,6 +63,8 @@ pub struct CallTrace {
     ///
     /// Note: This is optional because not all tracers make use of this.
     pub maybe_precompile: Option<bool>,
+    /// The address of the selfdestructed contract.
+    pub selfdestruct_address: Option<Address>,
     /// Holds the target for the selfdestruct refund target.
     ///
     /// This is only `Some` if a selfdestruct was executed and the call is executed before the
@@ -83,7 +92,7 @@ pub struct CallTrace {
     /// The gas limit of the call.
     pub gas_limit: u64,
     /// The final status of the call.
-    pub status: InstructionResult,
+    pub status: Option<InstructionResult>,
     /// Opcode-level execution steps.
     pub steps: Vec<CallTraceStep>,
     /// Optional complementary decoded call data.
@@ -94,13 +103,16 @@ impl CallTrace {
     /// Returns true if the status code is an error or revert, See [InstructionResult::Revert]
     #[inline]
     pub const fn is_error(&self) -> bool {
-        !self.status.is_ok()
+        let Some(status) = self.status else {
+            return false;
+        };
+        !status.is_ok()
     }
 
     /// Returns true if the status code is a revert.
     #[inline]
     pub fn is_revert(&self) -> bool {
-        self.status == InstructionResult::Revert
+        self.status.is_some_and(|status| status == InstructionResult::Revert)
     }
 
     /// Returns `true` if this trace was a selfdestruct.
@@ -115,33 +127,13 @@ impl CallTrace {
     /// `selfdestruct` inspector function will not be called after the Cancun hardfork.
     #[inline]
     pub const fn is_selfdestruct(&self) -> bool {
-        matches!(self.status, InstructionResult::SelfDestruct)
+        matches!(self.status, Some(InstructionResult::SelfDestruct))
             || self.selfdestruct_refund_target.is_some()
     }
 
     /// Returns the error message if it is an erroneous result.
     pub(crate) fn as_error_msg(&self, kind: TraceStyle) -> Option<String> {
-        // See also <https://github.com/ethereum/go-ethereum/blob/34d507215951fb3f4a5983b65e127577989a6db8/eth/tracers/native/call_flat.go#L39-L55>
-        self.is_error().then(|| match self.status {
-            InstructionResult::Revert => {
-                if kind.is_parity() { "Reverted" } else { "execution reverted" }.to_string()
-            }
-            InstructionResult::OutOfGas | InstructionResult::MemoryOOG => {
-                if kind.is_parity() { "Out of gas" } else { "out of gas" }.to_string()
-            }
-            InstructionResult::OpcodeNotFound => {
-                if kind.is_parity() { "Bad instruction" } else { "invalid opcode" }.to_string()
-            }
-            InstructionResult::StackOverflow => "Out of stack".to_string(),
-            InstructionResult::InvalidJump => {
-                if kind.is_parity() { "Bad jump destination" } else { "invalid jump destination" }
-                    .to_string()
-            }
-            InstructionResult::PrecompileError => {
-                if kind.is_parity() { "Built-in failed" } else { "precompiled failed" }.to_string()
-            }
-            status => format!("{:?}", status),
-        })
+        self.status.and_then(|status| utils::fmt_error_msg(status, kind))
     }
 }
 
@@ -224,20 +216,24 @@ impl CallTraceNode {
         &'a self,
         stack: &mut VecDeque<CallTraceStepStackItem<'a>>,
     ) {
-        stack.extend(self.call_step_stack().into_iter().rev());
-    }
+        let initial_len = stack.len();
 
-    /// Returns a list of all steps in this trace in the order they were executed
-    ///
-    /// If the step is a call, the id of the child trace is set.
-    pub(crate) fn call_step_stack(&self) -> Vec<CallTraceStepStackItem<'_>> {
-        let mut stack = Vec::with_capacity(self.trace.steps.len());
+        // First, extend the stack with all steps in reverse order
+        stack.extend(self.trace.steps.iter().rev().map(|step| CallTraceStepStackItem {
+            trace_node: self,
+            step,
+            call_child_id: None,
+        }));
+
+        // Then, iterate over the inserted range in reverse to set call_child_id values
+        // Since we inserted in reverse order, we need to process from the end to maintain
+        // the correct child_id assignment order
         let mut child_id = 0;
-        for step in self.trace.steps.iter() {
-            let mut item = CallTraceStepStackItem { trace_node: self, step, call_child_id: None };
+        for i in (initial_len..stack.len()).rev() {
+            let item = &mut stack[i];
 
-            // If the opcode is a call, put the child trace on the stack
-            if step.is_calllike_op() {
+            // If the opcode is a call, set the child trace id
+            if item.step.is_calllike_op() {
                 // The opcode of this step is a call but it's possible that this step resulted
                 // in a revert or out of gas error in which case there's no actual child call executed and recorded: <https://github.com/paradigmxyz/reth/issues/3915>
                 if let Some(call_id) = self.children.get(child_id).copied() {
@@ -245,9 +241,7 @@ impl CallTraceNode {
                     child_id += 1;
                 }
             }
-            stack.push(item);
         }
-        stack
     }
 
     /// Returns true if this is a call to a precompile
@@ -264,17 +258,13 @@ impl CallTraceNode {
 
     /// Returns the status of the call
     #[inline]
-    pub const fn status(&self) -> InstructionResult {
+    pub const fn status(&self) -> Option<InstructionResult> {
         self.trace.status
     }
 
     /// Returns the call context's 4 byte selector
     pub fn selector(&self) -> Option<FixedBytes<4>> {
-        if self.trace.data.len() < 4 {
-            None
-        } else {
-            Some(FixedBytes::from_slice(&self.trace.data[..4]))
-        }
+        (self.trace.data.len() >= 4).then(|| FixedBytes::from_slice(&self.trace.data[..4]))
     }
 
     /// Returns `true` if this trace was a selfdestruct.
@@ -309,42 +299,34 @@ impl CallTraceNode {
                 gas_used: self.trace.gas_used,
                 output: self.trace.output.clone(),
             }),
-            CallKind::Create | CallKind::Create2 | CallKind::EOFCreate => {
-                TraceOutput::Create(CreateOutput {
-                    gas_used: self.trace.gas_used,
-                    code: self.trace.output.clone(),
-                    address: self.trace.address,
-                })
-            }
+            CallKind::Create | CallKind::Create2 => TraceOutput::Create(CreateOutput {
+                gas_used: self.trace.gas_used,
+                code: self.trace.output.clone(),
+                address: self.trace.address,
+            }),
         }
     }
 
     /// If the trace is a selfdestruct, returns the `Action` for a parity trace.
     pub fn parity_selfdestruct_action(&self) -> Option<Action> {
-        if self.is_selfdestruct() {
-            Some(Action::Selfdestruct(SelfdestructAction {
-                address: self.trace.address,
+        self.is_selfdestruct().then(|| {
+            Action::Selfdestruct(SelfdestructAction {
+                address: self.trace.selfdestruct_address.unwrap_or_default(),
                 refund_address: self.trace.selfdestruct_refund_target.unwrap_or_default(),
                 balance: self.trace.selfdestruct_transferred_value.unwrap_or_default(),
-            }))
-        } else {
-            None
-        }
+            })
+        })
     }
 
     /// If the trace is a selfdestruct, returns the `CallFrame` for a geth call trace
     pub fn geth_selfdestruct_call_trace(&self) -> Option<CallFrame> {
-        if self.is_selfdestruct() {
-            Some(CallFrame {
-                typ: "SELFDESTRUCT".to_string(),
-                from: self.trace.address,
-                to: self.trace.selfdestruct_refund_target,
-                value: self.trace.selfdestruct_transferred_value,
-                ..Default::default()
-            })
-        } else {
-            None
-        }
+        self.is_selfdestruct().then(|| CallFrame {
+            typ: "SELFDESTRUCT".to_string(),
+            from: self.trace.selfdestruct_address.unwrap_or_default(),
+            to: self.trace.selfdestruct_refund_target,
+            value: self.trace.selfdestruct_transferred_value,
+            ..Default::default()
+        })
     }
 
     /// If the trace is a selfdestruct, returns the `TransactionTrace` for a parity trace.
@@ -377,14 +359,13 @@ impl CallTraceNode {
                 input: self.trace.data.clone(),
                 call_type: self.kind().into(),
             }),
-            CallKind::Create | CallKind::Create2 | CallKind::EOFCreate => {
-                Action::Create(CreateAction {
-                    from: self.trace.caller,
-                    value: self.trace.value,
-                    gas: self.trace.gas_limit,
-                    init: self.trace.data.clone(),
-                })
-            }
+            CallKind::Create | CallKind::Create2 => Action::Create(CreateAction {
+                from: self.trace.caller,
+                value: self.trace.value,
+                gas: self.trace.gas_limit,
+                init: self.trace.data.clone(),
+                creation_method: self.kind().into(),
+            }),
         }
     }
 
@@ -403,6 +384,7 @@ impl CallTraceNode {
             revert_reason: None,
             calls: Default::default(),
             logs: Default::default(),
+            start_index: (),
         };
 
         if self.trace.kind.is_static_call() {
@@ -412,10 +394,19 @@ impl CallTraceNode {
 
         // we need to populate error and revert reason
         if !self.trace.success {
+            if self.kind().is_any_create() {
+                call_frame.to = None;
+            }
+
+            if !self.status().is_some_and(|status| status.is_revert()) {
+                call_frame.gas_used = U256::from(self.trace.gas_limit);
+                call_frame.output = None;
+            }
+
             call_frame.revert_reason = utils::maybe_revert_reason(self.trace.output.as_ref());
 
-            // Note: the call tracer mimics parity's trace transaction and geth maps errors to parity style error messages, <https://github.com/ethereum/go-ethereum/blob/34d507215951fb3f4a5983b65e127577989a6db8/eth/tracers/native/call_flat.go#L39-L55>
-            call_frame.error = self.trace.as_error_msg(TraceStyle::Parity);
+            // Note: regular calltracer uses geth errors, only flatCallTracer uses parity errors: <https://github.com/ethereum/go-ethereum/blob/a9523b6428238a762e1a1e55e46ead47630c3a23/eth/tracers/native/call_flat.go#L226>
+            call_frame.error = self.trace.as_error_msg(TraceStyle::Geth);
         }
 
         if include_logs && !self.logs.is_empty() {
@@ -455,8 +446,6 @@ pub enum CallKind {
     Create,
     /// Represents a contract creation operation using the CREATE2 opcode.
     Create2,
-    /// Represents an EOF contract creation operation.
-    EOFCreate,
 }
 
 impl CallKind {
@@ -470,14 +459,13 @@ impl CallKind {
             Self::AuthCall => "AUTHCALL",
             Self::Create => "CREATE",
             Self::Create2 => "CREATE2",
-            Self::EOFCreate => "EOF_CREATE",
         }
     }
 
     /// Returns true if the call is a create
     #[inline]
     pub const fn is_any_create(&self) -> bool {
-        matches!(self, Self::Create | Self::Create2 | Self::EOFCreate)
+        matches!(self, Self::Create | Self::Create2)
     }
 
     /// Returns true if the call is a delegate of some sorts
@@ -499,8 +487,18 @@ impl CallKind {
     }
 }
 
-impl std::fmt::Display for CallKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl From<CallKind> for CreationMethod {
+    fn from(kind: CallKind) -> CreationMethod {
+        match kind {
+            CallKind::Create => CreationMethod::Create,
+            CallKind::Create2 => CreationMethod::Create2,
+            _ => CreationMethod::None,
+        }
+    }
+}
+
+impl core::fmt::Display for CallKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.to_str())
     }
 }
@@ -508,9 +506,9 @@ impl std::fmt::Display for CallKind {
 impl From<CallScheme> for CallKind {
     fn from(scheme: CallScheme) -> Self {
         match scheme {
-            CallScheme::Call | CallScheme::ExtCall => Self::Call,
-            CallScheme::StaticCall | CallScheme::ExtStaticCall => Self::StaticCall,
-            CallScheme::DelegateCall | CallScheme::ExtDelegateCall => Self::DelegateCall,
+            CallScheme::Call => Self::Call,
+            CallScheme::StaticCall => Self::StaticCall,
+            CallScheme::DelegateCall => Self::DelegateCall,
             CallScheme::CallCode => Self::CallCode,
         }
     }
@@ -521,6 +519,7 @@ impl From<CreateScheme> for CallKind {
         match create {
             CreateScheme::Create => Self::Create,
             CreateScheme::Create2 { .. } => Self::Create2,
+            CreateScheme::Custom { .. } => Self::Create,
         }
     }
 }
@@ -533,7 +532,7 @@ impl From<CallKind> for ActionType {
             | CallKind::DelegateCall
             | CallKind::CallCode
             | CallKind::AuthCall => Self::Call,
-            CallKind::Create | CallKind::Create2 | CallKind::EOFCreate => Self::Create,
+            CallKind::Create | CallKind::Create2 => Self::Create,
         }
     }
 }
@@ -545,7 +544,7 @@ impl From<CallKind> for CallType {
             CallKind::StaticCall => Self::StaticCall,
             CallKind::CallCode => Self::CallCode,
             CallKind::DelegateCall => Self::DelegateCall,
-            CallKind::Create | CallKind::Create2 | CallKind::EOFCreate => Self::None,
+            CallKind::Create | CallKind::Create2 => Self::None,
             CallKind::AuthCall => Self::AuthCall,
         }
     }
@@ -593,12 +592,12 @@ pub enum DecodedTraceStep {
     /// Keeps decoded internal call data and an index of the step where the internal call execution
     /// ends.
     InternalCall(DecodedInternalCall, usize),
-    /// Arbitrary line reperesenting the step. Might be used for displaying individual opcodes.
+    /// Arbitrary line representing the step. Might be used for displaying individual opcodes.
     Line(String),
 }
 
 /// Represents a tracked call step during execution
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallTraceStep {
     // Fields filled in `step`
@@ -606,8 +605,6 @@ pub struct CallTraceStep {
     pub depth: u64,
     /// Program counter before step execution
     pub pc: usize,
-    /// Code section index before step execution
-    pub code_section_idx: usize,
     /// Opcode to be executed
     #[cfg_attr(feature = "serde", serde(with = "opcode_serde"))]
     pub op: OpCode,
@@ -637,7 +634,7 @@ pub struct CallTraceStep {
     /// Final status of the step
     ///
     /// This is set after the step was executed.
-    pub status: InstructionResult,
+    pub status: Option<InstructionResult>,
     /// Immediate bytes of the step
     pub immediate_bytes: Option<Bytes>,
     /// Optional complementary decoded step data.
@@ -706,7 +703,10 @@ impl CallTraceStep {
     // Returns true if the status code is an error or revert, See [InstructionResult::Revert]
     #[inline]
     pub(crate) const fn is_error(&self) -> bool {
-        self.status as u8 >= InstructionResult::Revert as u8
+        let Some(status) = self.status else {
+            return false;
+        };
+        status.is_error()
     }
 
     /// Returns the error message if it is an erroneous result.
@@ -821,7 +821,6 @@ mod opcode_serde {
         D: Deserializer<'de>,
     {
         let op = u8::deserialize(deserializer)?;
-        Ok(OpCode::new(op)
-            .unwrap_or_else(|| OpCode::new(revm::interpreter::opcode::INVALID).unwrap()))
+        Ok(OpCode::new(op).unwrap_or_else(|| OpCode::new(revm::bytecode::opcode::INVALID).unwrap()))
     }
 }

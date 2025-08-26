@@ -1,128 +1,86 @@
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes};
 use colorchoice::ColorChoice;
 use revm::{
-    db::{CacheDB, EmptyDB},
-    inspector_handle_register,
-    primitives::{
-        BlockEnv, EVMError, Env, EnvWithHandlerCfg, ExecutionResult, HandlerCfg, ResultAndState,
-        SpecId, TransactTo, TxEnv,
+    context::{BlockEnv, CfgEnv, Evm, TxEnv},
+    context_interface::{
+        result::{ExecutionResult, HaltReason},
+        TransactTo,
     },
-    Database, DatabaseCommit, GetInspector,
+    handler::{instructions::EthInstructions, EthFrame, EthPrecompiles, EvmTr},
+    interpreter::interpreter::EthInterpreter,
+    primitives::hardfork::SpecId,
+    Context, Database, DatabaseCommit, ExecuteCommitEvm, InspectCommitEvm, Inspector, Journal,
 };
-use revm_inspectors::tracing::TracingInspector;
-use std::convert::Infallible;
+use revm_inspectors::tracing::{TraceWriter, TraceWriterConfig, TracingInspector};
 
-type TestDb = CacheDB<EmptyDB>;
-
-#[derive(Clone, Debug)]
-pub struct TestEvm {
-    pub db: TestDb,
-    pub env: EnvWithHandlerCfg,
-}
-
-impl Default for TestEvm {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TestEvm {
-    pub fn new() -> Self {
-        let db = CacheDB::new(EmptyDB::default());
-        let env = EnvWithHandlerCfg::new(
-            Box::new(Env {
-                block: BlockEnv { gas_limit: U256::MAX, ..Default::default() },
-                tx: TxEnv { gas_limit: u64::MAX, gas_price: U256::ZERO, ..Default::default() },
-                ..Default::default()
-            }),
-            HandlerCfg::new(SpecId::CANCUN),
-        );
-        Self { db, env }
-    }
-
-    pub fn deploy<I: for<'a> GetInspector<&'a mut TestDb>>(
-        &mut self,
-        data: Bytes,
-        inspector: I,
-    ) -> Result<Address, EVMError<Infallible>> {
-        let (_, address) = self.try_deploy(data, inspector)?;
-        Ok(address.expect("failed to deploy contract"))
-    }
-
-    pub fn try_deploy<I: for<'a> GetInspector<&'a mut TestDb>>(
-        &mut self,
-        data: Bytes,
-        inspector: I,
-    ) -> Result<(ExecutionResult, Option<Address>), EVMError<Infallible>> {
-        self.env.tx.data = data;
-        self.env.tx.transact_to = TransactTo::Create;
-
-        let (ResultAndState { result, state }, env) = self.inspect(inspector)?;
-        self.db.commit(state);
-        self.env = env;
-        match &result {
-            ExecutionResult::Success { output, .. } => {
-                let address = output.address().copied();
-                Ok((result, address))
-            }
-            _ => Ok((result, None)),
-        }
-    }
-
-    pub fn call<I: for<'a> GetInspector<&'a mut TestDb>>(
-        &mut self,
-        address: Address,
-        data: Bytes,
-        inspector: I,
-    ) -> Result<ExecutionResult, EVMError<Infallible>> {
-        self.env.tx.data = data;
-        self.env.tx.transact_to = TransactTo::Call(address);
-        let (ResultAndState { result, state }, env) = self.inspect(inspector)?;
-        self.db.commit(state);
-        self.env = env;
-        Ok(result)
-    }
-
-    pub fn inspect<I: for<'a> GetInspector<&'a mut TestDb>>(
-        &mut self,
-        inspector: I,
-    ) -> Result<(ResultAndState, EnvWithHandlerCfg), EVMError<Infallible>> {
-        inspect(&mut self.db, self.env.clone(), inspector)
-    }
-}
-
-/// Executes the [EnvWithHandlerCfg] against the given [Database] without committing state changes.
-pub fn inspect<DB, I>(
-    db: DB,
-    env: EnvWithHandlerCfg,
-    inspector: I,
-) -> Result<(ResultAndState, EnvWithHandlerCfg), EVMError<DB::Error>>
-where
-    DB: Database,
-    I: GetInspector<DB>,
-{
-    let mut evm = revm::Evm::builder()
-        .with_db(db)
-        .with_external_context(inspector)
-        .with_env_with_handler_cfg(env)
-        .append_handler_register(inspector_handle_register)
-        .build();
-    let res = evm.transact()?;
-    let (_, env) = evm.into_db_and_env_with_handler_cfg();
-    Ok((res, env))
-}
+pub type ContextDb<DB> = Context<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>;
 
 pub fn write_traces(tracer: &TracingInspector) -> String {
-    write_traces_with(tracer, ColorChoice::Never)
+    write_traces_with(tracer, TraceWriterConfig::new().color_choice(ColorChoice::Never))
 }
 
-pub fn write_traces_with(tracer: &TracingInspector, color: ColorChoice) -> String {
-    let mut w = revm_inspectors::tracing::TraceWriter::new(Vec::<u8>::new()).use_colors(color);
+pub fn write_traces_with(tracer: &TracingInspector, config: TraceWriterConfig) -> String {
+    let mut w = TraceWriter::with_config(Vec::<u8>::new(), config);
     w.write_arena(tracer.traces()).expect("failed to write traces to Vec<u8>");
     String::from_utf8(w.into_writer()).expect("trace writer wrote invalid UTF-8")
 }
 
 pub fn print_traces(tracer: &TracingInspector) {
     // Use `println!` so that the output is captured by the test runner.
-    println!("{}", write_traces_with(tracer, ColorChoice::Auto));
+    println!("{}", write_traces_with(tracer, TraceWriterConfig::new()));
+}
+
+pub type EvmDb<DB, INSP> = Evm<
+    ContextDb<DB>,
+    INSP,
+    EthInstructions<EthInterpreter, ContextDb<DB>>,
+    EthPrecompiles,
+    EthFrame,
+>;
+
+/// Deploys a contract with the given code and deployer address.
+pub fn deploy_contract<DB: Database + DatabaseCommit>(
+    evm: &mut EvmDb<DB, ()>,
+    code: Bytes,
+    deployer: Address,
+    spec: SpecId,
+) -> ExecutionResult<HaltReason> {
+    evm.ctx().modify_tx(|tx| {
+        tx.caller = deployer;
+        tx.gas_limit = 1000000;
+        tx.kind = TransactTo::Create;
+        tx.data = code;
+    });
+    evm.ctx().modify_cfg(|cfg| cfg.spec = spec);
+
+    let out = evm.replay_commit().expect("Expect to be executed");
+    evm.modify_tx(|tx| {
+        tx.nonce += 1;
+    });
+    out
+}
+
+/// Deploys a contract with the given code and deployer address.
+pub fn inspect_deploy_contract<DB: Database + DatabaseCommit, INSP: Inspector<ContextDb<DB>>>(
+    evm: &mut EvmDb<DB, INSP>,
+    code: Bytes,
+    deployer: Address,
+    spec: SpecId,
+) -> ExecutionResult<HaltReason> {
+    evm.ctx().modify_cfg(|cfg| cfg.spec = spec);
+
+    let output = evm
+        .inspect_tx_commit(TxEnv {
+            caller: deployer,
+            gas_limit: 1000000,
+            kind: TransactTo::Create,
+            data: code,
+            ..Default::default()
+        })
+        .expect("Expect to be executed");
+
+    evm.ctx().modify_tx(|tx| {
+        tx.nonce += 1;
+    });
+    output
 }
