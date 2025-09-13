@@ -362,6 +362,7 @@ impl SentioTraceBuilder {
                             let slot = B256::from(stack.last().unwrap().to_be_bytes());
                             prev_sload_frame = Some(SentioTrace {
                                 storage_address: Some(node.execution_address()),
+                                code_address: Some(code_address.to_string().to_lowercase()),
                                 storage_slot: Some(slot),
                                 ..base_frame()
                             });
@@ -375,6 +376,7 @@ impl SentioTraceBuilder {
                             let value = B256::from(stack[stack.len() - 2].to_be_bytes());
                             let frame = SentioTrace {
                                 storage_address: Some(node.execution_address()),
+                                code_address: Some(code_address.to_string().to_lowercase()),
                                 storage_slot: Some(slot),
                                 storage_value: Some(value),
                                 ..base_frame()
