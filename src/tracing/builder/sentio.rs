@@ -236,7 +236,7 @@ impl SentioTraceBuilder {
                                             function_info: function,
                                             address,
                                         } = &frame.function.unwrap();
-                                        let stack = step.stack.as_ref().unwrap();
+                                        let stack = &step.stack.as_ref().unwrap().to_vec();
                                         let output_enough = function.output_size <= stack.len();
                                         if !output_enough {
                                             println!("stack size not enough, stack: {}, output_size: {}, address: {}, function: {}, pc: {}", stack.len(), function.output_size, address, function.name, last_pc);
@@ -293,7 +293,7 @@ impl SentioTraceBuilder {
                             };
 
                             // get exit pc from stack
-                            let stack = step.stack.as_ref().unwrap();
+                            let stack = &step.stack.as_ref().unwrap().to_vec();
                             let input_enough = function.input_size <= stack.len();
                             if !input_enough {
                                 println!("stack size not enough, stack: {}, input_size: {}, address: {}, function: {}, pc: {}", stack.len(), function.input_size, address, function.name, last_pc);
@@ -422,7 +422,7 @@ impl SentioTraceBuilder {
                         let ctx = EvalCtx {
                             step,
                             call_node: node,
-                            stack: step.stack.as_ref().unwrap(),
+                            stack: &step.stack.as_ref().unwrap().to_vec(),
                             origin: &self.origin,
                             debug: self.tracer_config.debug,
                         };
@@ -449,7 +449,7 @@ impl SentioTraceBuilder {
                         }
                         let frame = SentioTrace {
                             match_rule_ids: Some(match_rule_ids),
-                            stack: step.stack.clone(),
+                            stack: step.stack.clone().map(|t| t.to_vec()),
                             memory: step.memory.clone().map(|m| m.memory_chunks()),
                             ..base_frame()
                         };
