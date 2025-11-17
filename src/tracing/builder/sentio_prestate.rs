@@ -114,25 +114,29 @@ impl SentioPrestateTraceBuilder {
             SentioPrestateResult { pre, post: Some(post) }
         };
         for node in &self.nodes {
-            let caller = node.trace.address;
             for step in &node.trace.steps {
                 let Some(stack) = &step.stack else {
                     continue;
                 };
-                let code_address = step.contract;
+                let address = node.execution_address();
+                let code_address = node.trace.address;
                 match step.op {
                     OpCode::SLOAD | OpCode::SSTORE => {
-                        if let Some(entry) = ret.pre.get_mut(&caller) {
+                        if let Some(entry) = ret.pre.get_mut(&address) {
                             let slot = B256::from(stack.last().unwrap().to_be_bytes());
                             entry.code_address = Some(code_address);
                             entry.code_address_by_slot.insert(slot, code_address);
                         }
                     }
                     OpCode::KECCAK256 => {
-                        if let Some(entry) = ret.pre.get_mut(&caller) {
+                        if let Some(entry) = ret.pre.get_mut(&address) {
                             let memory = &step.memory.clone().unwrap();
                             let offset = stack.last().unwrap().to::<usize>();
-                            let raw_key = &memory.as_bytes()[offset..offset + 64];
+                            let size = stack[stack.len() - 2].to::<usize>();
+                            if size != 64 {
+                                continue;
+                            }
+                            let raw_key = &memory.as_bytes()[offset..offset + size];
                             let hash_of_key = keccak256(raw_key);
                             entry.mapping_keys.insert(B512::from_slice(raw_key), hash_of_key);
 
