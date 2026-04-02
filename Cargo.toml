@@ -50,6 +50,8 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 boa_engine = { version = "0.21", optional = true }
 boa_gc = { version = "0.21", optional = true }
 
+lazy_static = "1.5.0"
+
 [dev-dependencies]
 alloy-hardforks = "0.4"
 snapbox = { version = "0.6", features = ["term-svg"] }
@@ -66,3 +68,9 @@ std = [
 ]
 serde = ["dep:serde", "revm/serde"]
 js-tracer = ["dep:boa_engine", "dep:boa_gc"]
+
+[patch.crates-io]
+#revm = { git = "https://github.com/bluealloy/revm", rev = "e13b609fbbc80f9e5858255e4412db95c0cc6d12" }
+revm = { git = "https://github.com/sentioxyz/revm", branch = "release/v103" }
+alloy-rpc-types-eth = { git = "https://github.com/sentioxyz/alloy", branch = "release/v1.6.3" }
+alloy-rpc-types-trace = { git = "https://github.com/sentioxyz/alloy", branch = "release/v1.6.3" }
