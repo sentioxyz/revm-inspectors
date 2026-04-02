@@ -443,6 +443,7 @@ impl CallTraceNode {
             revert_reason: None,
             calls: Default::default(),
             logs: Default::default(),
+            start_index: (),
         };
 
         if self.trace.kind.is_static_call() {
@@ -656,7 +657,7 @@ pub enum DecodedTraceStep {
 }
 
 /// Represents a tracked call step during execution
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallTraceStep {
     // Fields filled in `step`
