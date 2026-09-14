@@ -250,6 +250,14 @@ impl TracingInspectorConfig {
         Self::none()
     }
 
+    pub const fn default_sentio() -> Self {
+        Self {
+            record_memory_snapshots: true,
+            record_logs: true,
+            ..Self::default_geth()
+        }
+    }
+
     /// Merge another config into this one.
     #[inline]
     pub fn merge(&mut self, other: Self) -> &mut Self {
