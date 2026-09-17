@@ -1,15 +1,21 @@
 use crate::tracing::{
-    FourByteInspector, MuxInspector, TracingInspector, TracingInspectorConfig, TransactionContext,
+    FourByteInspector, MuxInspector, SentioPrestateTraceBuilder, SentioTraceBuilder,
+    TracingInspector, TracingInspectorConfig, TransactionContext,
 };
 #[cfg(feature = "js-tracer")]
 use alloc::boxed::Box;
+use alloy_primitives::U64;
 use alloy_rpc_types_eth::TransactionInfo;
 use alloy_rpc_types_trace::geth::{
-    erc7562::Erc7562Config, mux::MuxConfig, CallConfig, FourByteFrame, GethDebugBuiltInTracerType,
-    GethDebugTracerType, GethDebugTracingOptions, GethDefaultTracingOptions, GethTrace, NoopFrame,
-    PreStateConfig,
+    erc7562::Erc7562Config,
+    mux::MuxConfig,
+    sentio::{SentioReceipt, SentioTracerConfig},
+    sentio_prestate::SentioPrestateTracerConfig,
+    CallConfig, FourByteFrame, GethDebugBuiltInTracerType, GethDebugTracerType,
+    GethDebugTracingOptions, GethDefaultTracingOptions, GethTrace, NoopFrame, PreStateConfig,
 };
 use revm::{
+    context::result::ExecutionResult,
     context_interface::{
         result::{HaltReasonTr, ResultAndState},
         Block, ContextTr, Transaction,
@@ -48,6 +54,12 @@ pub enum DebugInspector {
     FlatCallTracer(TracingInspector),
     /// Erc7562Tracer
     Erc7562Tracer(TracingInspector, Erc7562Config),
+    /// SentioTracer
+    SentioTracer(TracingInspector, SentioTracerConfig),
+    /// SentioPrestateTracer
+    SentioPrestateTracer(TracingInspector, SentioPrestateTracerConfig),
+    /// SentioRethRawTracer
+    SentioRethRawTracer(TracingInspector),
     /// Default tracer
     Default(TracingInspector, GethDefaultTracingOptions),
     #[cfg(feature = "js-tracer")]
@@ -72,6 +84,13 @@ impl DebugInspector {
                 Self::Erc7562Tracer(inspector.clone(), config.clone())
             }
             Self::Default(inspector, config) => Self::Default(inspector.clone(), *config),
+            Self::SentioTracer(inspector, config) => {
+                Self::SentioTracer(inspector.clone(), config.clone())
+            }
+            Self::SentioPrestateTracer(inspector, config) => {
+                Self::SentioPrestateTracer(inspector.clone(), config.clone())
+            }
+            Self::SentioRethRawTracer(inspector) => Self::SentioRethRawTracer(inspector.clone()),
             #[cfg(feature = "js-tracer")]
             Self::Js(inspector) => Self::Js(inspector.try_clone()?.into()),
         })
@@ -150,6 +169,37 @@ impl DebugInspector {
                             config,
                         )
                     }
+                    GethDebugBuiltInTracerType::SentioTracer => {
+                        let config = if tracer_config.is_null() {
+                            SentioTracerConfig::default()
+                        } else {
+                            tracer_config
+                                .from_value()
+                                .map_err(|_| DebugInspectorError::InvalidTracerConfig)?
+                        };
+
+                        Self::SentioTracer(
+                            TracingInspector::new(TracingInspectorConfig::default_sentio()),
+                            config,
+                        )
+                    }
+                    GethDebugBuiltInTracerType::SentioPrestateTracer => {
+                        let config = if tracer_config.is_null() {
+                            SentioPrestateTracerConfig::default()
+                        } else {
+                            tracer_config
+                                .from_value()
+                                .map_err(|_| DebugInspectorError::InvalidTracerConfig)?
+                        };
+
+                        Self::SentioPrestateTracer(
+                            TracingInspector::new(TracingInspectorConfig::default_sentio()),
+                            config,
+                        )
+                    }
+                    GethDebugBuiltInTracerType::SentioRethRawTracer => Self::SentioRethRawTracer(
+                        TracingInspector::new(TracingInspectorConfig::default_sentio()),
+                    ),
                     _ => {
                         // Note: this match is non-exhaustive in case we need to add support for
                         // additional tracers
@@ -192,6 +242,9 @@ impl DebugInspector {
             | Self::PreStateTracer(inspector, _)
             | Self::FlatCallTracer(inspector)
             | Self::Erc7562Tracer(inspector, _)
+            | Self::SentioTracer(inspector, _)
+            | Self::SentioPrestateTracer(inspector, _)
+            | Self::SentioRethRawTracer(inspector)
             | Self::Default(inspector, _) => inspector.fuse(),
             Self::Noop(_) | Self::StateGasTracer(_) => {}
             Self::Mux(inspector, config) => {
@@ -272,6 +325,47 @@ impl DebugInspector {
                     .geth_erc7562_traces(config.clone(), res.result.tx_gas_used(), db)
                     .into()
             }
+            Self::SentioTracer(inspector, config) => {
+                inspector.set_transaction_gas_limit(tx_env.gas_limit());
+                let refund = if let ExecutionResult::Success { gas, .. } = &res.result {
+                    gas.final_refunded()
+                } else {
+                    0
+                };
+                let block_number = block_env.number().saturating_to::<u64>();
+                let block_hash = tx_context.as_ref().and_then(|c| c.block_hash);
+                let receipt = SentioReceipt {
+                    nonce: Some(tx_env.nonce()),
+                    block_number: Some(U64::from(block_number)),
+                    block_hash,
+                    gas_price: Some(U256::from(tx_env.gas_price())),
+                    transaction_index: Some(0),
+                    tx_hash: None,
+                };
+                SentioTraceBuilder::new(
+                    inspector.clone().into_traces().into_nodes(),
+                    None,
+                    config.clone(),
+                )
+                .sentio_traces(res.result.tx_gas_used(), refund, Some(receipt))
+                .into()
+            }
+            Self::SentioPrestateTracer(inspector, config) => {
+                inspector.set_transaction_gas_limit(tx_env.gas_limit());
+                SentioPrestateTraceBuilder::new(
+                    inspector.clone().into_traces().into_nodes(),
+                    config.clone(),
+                )
+                .sentio_prestate_traces(&res, db)
+                .map_err(DebugInspectorError::Database)?
+                .into()
+            }
+            Self::SentioRethRawTracer(inspector) => {
+                inspector.set_transaction_gas_limit(tx_env.gas_limit());
+                let value =
+                    serde_json::to_value(inspector.clone().into_traces().into_nodes()).unwrap();
+                GethTrace::SentioRethRawTracer(value)
+            }
             Self::Default(inspector, config) => {
                 inspector.set_transaction_gas_limit(tx_env.gas_limit());
                 inspector.set_transaction_caller(tx_env.caller());
@@ -311,6 +405,9 @@ macro_rules! delegate {
             Self::Noop($insp) => Inspector::<CTX>::$method($insp, $($arg),*),
             Self::StateGasTracer($insp) => Inspector::<CTX>::$method($insp, $($arg),*),
             Self::Mux($insp, _) => Inspector::<CTX>::$method($insp, $($arg),*),
+            Self::SentioTracer($insp, _) => Inspector::<CTX>::$method($insp, $($arg),*),
+            Self::SentioPrestateTracer($insp, _) => Inspector::<CTX>::$method($insp, $($arg),*),
+            Self::SentioRethRawTracer($insp) => Inspector::<CTX>::$method($insp, $($arg),*),
             #[cfg(feature = "js-tracer")]
             Self::Js($insp) => Inspector::<CTX>::$method($insp, $($arg),*),
         }
