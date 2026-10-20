@@ -148,6 +148,7 @@ pub fn immediate_size(bytecode: &impl Immediates) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_rpc_types_trace::geth::SentioDebugTracingOptions;
     use revm::{
         bytecode::Bytecode,
         database::CacheDB,
@@ -171,6 +172,7 @@ mod tests {
             false,
             SpecId::default(),
             u64::MAX,
+            SentioDebugTracingOptions::default(),
         );
         let db = CacheDB::new(EmptyDB::default());
 
@@ -201,6 +203,7 @@ mod tests {
             false,
             SpecId::default(),
             u64::MAX,
+            SentioDebugTracingOptions::default(),
         );
         let db = CacheDB::new(EmptyDB::default());
 

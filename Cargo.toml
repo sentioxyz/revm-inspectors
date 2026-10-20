@@ -52,6 +52,8 @@ boa_gc = { version = "0.22", optional = true }
 num-bigint = { version = "0.5", optional = true, default-features = false }
 ruint = { version = "1.18", optional = true, default-features = false }
 
+lazy_static = "1.5.0"
+
 [dev-dependencies]
 alloy-hardforks = "0.4"
 criterion = "0.8"
@@ -74,3 +76,8 @@ std = [
 ]
 serde = ["dep:serde", "revm/serde"]
 js-tracer = ["dep:boa_engine", "dep:boa_gc", "dep:num-bigint", "dep:ruint"]
+
+[patch.crates-io]
+revm = { git = "https://github.com/sentioxyz/revm", branch = "release/v120" }
+alloy-rpc-types-eth = { git = "https://github.com/sentioxyz/alloy", branch = "release/v2.5.0" }
+alloy-rpc-types-trace = { git = "https://github.com/sentioxyz/alloy", branch = "release/v2.5.0" }

@@ -286,6 +286,15 @@ impl TracingInspectorConfig {
         Self::none()
     }
 
+    pub const fn default_sentio() -> Self {
+        Self {
+            record_inputs: true,
+            record_memory_snapshots: true,
+            record_logs: true,
+            ..Self::default_geth()
+        }
+    }
+
     /// Merge another config into this one.
     #[inline]
     pub fn merge(&mut self, other: Self) -> &mut Self {
@@ -536,6 +545,7 @@ mod tests {
         for config in [
             TracingInspectorConfig::all(),
             TracingInspectorConfig::default_parity(),
+            TracingInspectorConfig::default_sentio(),
             TracingInspectorConfig::from_geth_call_config(&CallConfig::default()),
             TracingInspectorConfig::from_geth_erc7562_config(&Erc7562Config::default()),
             TracingInspectorConfig::from_flat_call_config(&FlatCallConfig::default()),

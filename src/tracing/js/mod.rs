@@ -525,7 +525,7 @@ impl JsInspector {
         self.check_interrupt(context).then(|| InterpreterResult {
             result: InstructionResult::FatalExternalError,
             output: Bytes::new(),
-            gas: Gas::new(gas_limit),
+            gas: Gas::new(gas_limit, false),
         })
     }
 
@@ -934,7 +934,11 @@ pub enum JsInspectorError {
 #[inline]
 fn js_error_to_revert(err: JsError) -> InterpreterResult {
     let output = err.to_string().as_bytes().to_vec();
-    InterpreterResult { result: InstructionResult::Revert, output: output.into(), gas: Gas::new(0) }
+    InterpreterResult {
+        result: InstructionResult::Revert,
+        output: output.into(),
+        gas: Gas::new(0, false),
+    }
 }
 
 #[cfg(test)]
